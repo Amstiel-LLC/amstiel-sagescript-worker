@@ -6,7 +6,7 @@
   "type": "module",
   
 "scripts": {
-  "build": "npx tsc",
+  "build": "node node_modules/typescript/bin/tsc",
   "start": "node dist/index.js"
 },
 "dependencies": {
