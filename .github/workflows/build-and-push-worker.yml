@@ -2,7 +2,7 @@ name: Build and Push Worker Image
 
 on:
   push:
-    branches: ["main"]
+    branches: ["main", "feature/azure-container-apps-cicd"]
   workflow_dispatch: {}
 
 permissions:
