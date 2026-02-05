@@ -24,6 +24,9 @@
   "@azure/identity": "^4.13.0",
   
     
+  "@azure/service-bus": "^7.9.5",
+  
+    
   "@azure/storage-blob": "^12.18.0",
   
     
