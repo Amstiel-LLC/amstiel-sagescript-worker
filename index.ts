@@ -154,14 +154,9 @@ async function downloadAudio(path: string): Promise<Buffer> {
 }
 
 async function insertTranscript(job: any, text: string, segments: any[]) {
-  // Use upsert with ON CONFLICT
   const result = await query(
     `INSERT INTO transcripts (job_id, organization_id, text, segments)
      VALUES ($1, $2, $3, $4)
-     ON CONFLICT (job_id) DO UPDATE SET
-       text = EXCLUDED.text,
-       segments = EXCLUDED.segments,
-       updated_at = NOW()
      RETURNING id`,
     [job.id, job.organization_id, text, JSON.stringify(segments)]
   )
