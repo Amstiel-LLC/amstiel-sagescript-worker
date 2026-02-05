@@ -55,7 +55,7 @@ function getPool(): Pool {
 
     console.log("[db] Worker configured with Azure AD managed identity authentication");
   } else {
-    // Traditional connection string (local dev, Supabase, etc.)
+    // Traditional connection string (local dev fallback)
     pool = new Pool({
       connectionString: process.env.WORKER_POSTGRES_URL,
       ssl: { rejectUnauthorized: false },

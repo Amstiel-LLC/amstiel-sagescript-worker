@@ -92,7 +92,7 @@ Railway will automatically redeploy with the new code.
 After migration, ensure you have:
 
 - [ ] Azure OpenAI BAA signed (available in Azure Portal)
-- [ ] Supabase BAA signed (Pro plan+)
+- [ ] Azure PostgreSQL BAA (included with Azure)
 - [ ] Microsoft Entra (already configured)
 - [ ] Data Processing Agreement with customer
 - [ ] Privacy policy updated to mention AI processing
