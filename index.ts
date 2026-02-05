@@ -25,10 +25,26 @@ if (!useAADAuth && !process.env.WORKER_POSTGRES_URL) {
   throw new Error('Missing database config: set AZURE_POSTGRES_HOST + AZURE_POSTGRES_DB (AAD) or WORKER_POSTGRES_URL')
 }
 
-// Service Bus (optional - falls back to polling if not configured)
+// ─────────────────────────────────────────────
+// Service Bus (Managed Identity - HIPAA/SOC2 compliant)
+// ─────────────────────────────────────────────
+
+// Full namespace FQDN (e.g. amstiel-sb-prod.servicebus.windows.net)
 const SERVICEBUS_NAMESPACE = process.env.SERVICEBUS_NAMESPACE_FQDN;
+
+// Queue name (e.g. sagescript-jobs)
 const SERVICEBUS_QUEUE = process.env.SERVICEBUS_QUEUE_NAME;
-const USE_SERVICE_BUS = !!(SERVICEBUS_NAMESPACE && SERVICEBUS_QUEUE);
+
+// Worker uses Service Bus if both values are present
+const USE_SERVICE_BUS = Boolean(SERVICEBUS_NAMESPACE && SERVICEBUS_QUEUE);
+
+if (USE_SERVICE_BUS) {
+    console.log("Service Bus mode enabled.");
+    console.log(`Namespace: ${SERVICEBUS_NAMESPACE}`);
+    console.log(`Queue: ${SERVICEBUS_QUEUE}`);
+} else {
+    console.log("Service Bus not configured. Falling back to polling mode.");
+}
 
 if (!process.env.AZURE_STORAGE_ACCOUNT_NAME) {
   throw new Error('Missing AZURE_STORAGE_ACCOUNT_NAME environment variable')
@@ -335,8 +351,10 @@ async function fetchJobById(jobId: string): Promise<any> {
 
 async function serviceBusWorker() {
   console.log("Worker started (Service Bus mode)");
-  console.log(`Connecting to: ${SERVICEBUS_NAMESPACE}, queue: ${SERVICEBUS_QUEUE}`);
+  console.log(`Connecting to namespace: ${SERVICEBUS_NAMESPACE}`);
+  console.log(`Queue: ${SERVICEBUS_QUEUE}`);
 
+  // Managed Identity authentication (SOC2/HIPAA compliant)
   const credential = new DefaultAzureCredential();
   const sbClient = new ServiceBusClient(SERVICEBUS_NAMESPACE!, credential);
   const receiver = sbClient.createReceiver(SERVICEBUS_QUEUE!);
@@ -345,13 +363,13 @@ async function serviceBusWorker() {
     await logSystemEvent({
       component: 'worker',
       severity: 'info',
-      message: 'Worker booted (Service Bus mode).',
-    })
+      message: 'Worker booted (Service Bus mode, Managed Identity).',
+    });
   } catch (err) {
-    console.error('logSystemEvent failed:', err)
+    console.error('logSystemEvent failed:', err);
   }
 
-  // Handle graceful shutdown
+  // Graceful shutdown
   const shutdown = async () => {
     console.log("Shutting down Service Bus receiver...");
     await receiver.close();
@@ -359,6 +377,7 @@ async function serviceBusWorker() {
     await closePool();
     process.exit(0);
   };
+
   process.on('SIGTERM', shutdown);
   process.on('SIGINT', shutdown);
 
@@ -368,7 +387,7 @@ async function serviceBusWorker() {
     console.log(`Received message for job: ${jobId}`);
 
     if (!jobId || typeof jobId !== 'string') {
-      console.error('Invalid message body, expected job_id:', message.body);
+      console.error('Invalid message body:', message.body);
       await receiver.completeMessage(message);
       return;
     }
@@ -387,31 +406,27 @@ async function serviceBusWorker() {
     } catch (err: any) {
       console.error(`Job ${jobId} failed:`, err);
 
-      try {
-        await logSystemEvent({
-          component: 'worker',
-          severity: 'error',
-          message: err?.message || 'Worker job failed',
-          metadata: { stack: err?.stack, job_id: jobId },
-        })
-      } catch (logError) {
-        console.error('logSystemEvent failed:', logError)
-      }
+      await logSystemEvent({
+        component: 'worker',
+        severity: 'error',
+        message: err?.message || 'Worker job failed',
+        metadata: { stack: err?.stack, job_id: jobId },
+      }).catch(console.error);
 
-      // Fetch job again to handle failure (may have been partially processed)
       const failedJob = await query(
         `SELECT id, retry_count, max_retries FROM transcription_jobs WHERE id = $1`,
         [jobId]
       );
-      if (failedJob.rows[0]) {
-        await handleJobFailure(failedJob.rows[0], err);
+
+      const job = failedJob.rows[0];
+
+      if (job) {
+        await handleJobFailure(job, err);
       }
 
-      // Dead-letter if max retries exceeded, otherwise abandon for retry
-      const job = failedJob.rows[0];
       if (job && (job.retry_count ?? 0) >= (job.max_retries ?? 3)) {
         await receiver.deadLetterMessage(message, {
-          deadLetterReason: 'MaxRetriesExceeded',
+          deadLetterReason: "MaxRetriesExceeded",
           deadLetterErrorDescription: err.message,
         });
       } else {
@@ -420,25 +435,24 @@ async function serviceBusWorker() {
     }
   };
 
+  // Error handler
   const errorHandler = async (args: ProcessErrorArgs) => {
-    console.error('Service Bus error:', args.error);
+    console.error("Service Bus error:", args.error);
+
     await logSystemEvent({
       component: 'worker',
       severity: 'error',
       message: 'Service Bus error',
-      metadata: { error: args.error.message, stack: args.error.stack, source: args.errorSource },
+      metadata: { error: args.error.message, stack: args.error.stack },
     }).catch(console.error);
   };
 
-  // Start receiving messages
   receiver.subscribe({
     processMessage: messageHandler,
     processError: errorHandler,
   });
 
-  console.log("Listening for messages...");
-
-  // Keep the process alive
+  console.log("Listening for Service Bus messages...");
   await new Promise(() => {});
 }
 
