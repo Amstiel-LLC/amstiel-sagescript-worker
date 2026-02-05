@@ -16,56 +16,34 @@ async function getAADToken(): Promise<string> {
   return token.token;
 }
 
-/**
- * Determines which connection mode to use:
- * - "aad" = Azure AD managed identity (AZURE_POSTGRES_HOST + AZURE_POSTGRES_DB)
- * - "connection_string" = Traditional connection string (WORKER_POSTGRES_URL)
- */
-function getConnectionMode(): "aad" | "connection_string" {
-  if (process.env.AZURE_POSTGRES_HOST && process.env.AZURE_POSTGRES_DB) {
-    return "aad";
+function validateConfig(): void {
+  if (!process.env.AZURE_POSTGRES_HOST || !process.env.AZURE_POSTGRES_DB) {
+    throw new Error(
+      "Missing database configuration. Set AZURE_POSTGRES_HOST and AZURE_POSTGRES_DB"
+    );
   }
-  if (process.env.WORKER_POSTGRES_URL) {
-    return "connection_string";
-  }
-  throw new Error(
-    "Missing database configuration. Set either AZURE_POSTGRES_HOST + AZURE_POSTGRES_DB (for AAD auth) or WORKER_POSTGRES_URL"
-  );
 }
 
 function getPool(): Pool {
   if (pool) return pool;
 
-  const mode = getConnectionMode();
+  validateConfig();
 
-  if (mode === "aad") {
-    // Azure AD token-based authentication (managed identity)
-    pool = new Pool({
-      host: process.env.AZURE_POSTGRES_HOST,
-      database: process.env.AZURE_POSTGRES_DB,
-      user: process.env.AZURE_POSTGRES_USER || "worker-mi",
-      port: parseInt(process.env.AZURE_POSTGRES_PORT || "5432", 10),
-      ssl: { rejectUnauthorized: false },
-      max: 5,
-      idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 10000,
-      // Dynamic password function - fetches fresh AAD token
-      password: async () => await getAADToken(),
-    });
+  // Azure AD token-based authentication (managed identity)
+  pool = new Pool({
+    host: process.env.AZURE_POSTGRES_HOST,
+    database: process.env.AZURE_POSTGRES_DB,
+    user: process.env.AZURE_POSTGRES_USER || "worker-mi",
+    port: parseInt(process.env.AZURE_POSTGRES_PORT || "5432", 10),
+    ssl: { rejectUnauthorized: false },
+    max: 5,
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 10000,
+    // Dynamic password function - fetches fresh AAD token
+    password: async () => await getAADToken(),
+  });
 
-    console.log("[db] Worker configured with Azure AD managed identity authentication");
-  } else {
-    // Traditional connection string (local dev fallback)
-    pool = new Pool({
-      connectionString: process.env.WORKER_POSTGRES_URL,
-      ssl: { rejectUnauthorized: false },
-      max: 5,
-      idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 10000,
-    });
-
-    console.log("[db] Worker configured with connection string");
-  }
+  console.log("[db] Worker configured with Azure AD managed identity authentication");
 
   return pool;
 }
@@ -97,11 +75,4 @@ export async function closePool(): Promise<void> {
     await pool.end();
     pool = null;
   }
-}
-
-/**
- * Get the current connection mode for debugging.
- */
-export function getDbConnectionMode(): "aad" | "connection_string" {
-  return getConnectionMode();
 }

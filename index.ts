@@ -19,10 +19,9 @@ const TRANSCRIBE_MODEL = process.env.USE_AZURE_OPENAI === 'true'
 // Environment validation
 // ─────────────────────────────────────────────
 
-// Database: Either AAD auth or connection string
-const useAADAuth = !!(process.env.AZURE_POSTGRES_HOST && process.env.AZURE_POSTGRES_DB);
-if (!useAADAuth && !process.env.WORKER_POSTGRES_URL) {
-  throw new Error('Missing database config: set AZURE_POSTGRES_HOST + AZURE_POSTGRES_DB (AAD) or WORKER_POSTGRES_URL')
+// Database: Azure AD managed identity only
+if (!process.env.AZURE_POSTGRES_HOST || !process.env.AZURE_POSTGRES_DB) {
+  throw new Error('Missing database config: set AZURE_POSTGRES_HOST and AZURE_POSTGRES_DB')
 }
 
 // ─────────────────────────────────────────────
