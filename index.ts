@@ -10,45 +10,6 @@ import { transcodeAudio } from './ffmpeg.js'
 import { query, closePool } from './lib/db.js'
 import { downloadBlob } from './lib/azureStorage.js'
 
-const WHISPER_RATE = Number(process.env.WHISPER_RATE ?? '0')
-const TRANSCRIBE_MODEL = process.env.USE_AZURE_OPENAI === 'true'
-  ? process.env.AZURE_WHISPER_DEPLOYMENT_NAME || 'whisper-1'
-  : 'gpt-4o-transcribe'
-
-// ─────────────────────────────────────────────
-// Environment validation
-// ─────────────────────────────────────────────
-
-// Database: Azure AD managed identity only
-if (!process.env.AZURE_POSTGRES_HOST || !process.env.AZURE_POSTGRES_DB) {
-  throw new Error('Missing database config: set AZURE_POSTGRES_HOST and AZURE_POSTGRES_DB')
-}
-
-// ─────────────────────────────────────────────
-// Service Bus (Managed Identity - HIPAA/SOC2 compliant)
-// ─────────────────────────────────────────────
-
-// Full namespace FQDN (e.g. amstiel-sb-prod.servicebus.windows.net)
-const SERVICEBUS_NAMESPACE = process.env.SERVICEBUS_NAMESPACE_FQDN;
-
-// Queue name (e.g. sagescript-jobs)
-const SERVICEBUS_QUEUE = process.env.SERVICEBUS_QUEUE_NAME;
-
-// Worker uses Service Bus if both values are present
-const USE_SERVICE_BUS = Boolean(SERVICEBUS_NAMESPACE && SERVICEBUS_QUEUE);
-
-if (USE_SERVICE_BUS) {
-    console.log("Service Bus mode enabled.");
-    console.log(`Namespace: ${SERVICEBUS_NAMESPACE}`);
-    console.log(`Queue: ${SERVICEBUS_QUEUE}`);
-} else {
-    console.log("Service Bus not configured. Falling back to polling mode.");
-}
-
-if (!process.env.AZURE_STORAGE_ACCOUNT_NAME) {
-  throw new Error('Missing AZURE_STORAGE_ACCOUNT_NAME environment variable')
-}
-
 // ─────────────────────────────────────────────
 // Utils
 // ─────────────────────────────────────────────
@@ -224,7 +185,7 @@ async function handleJobFailure(job: any, err: any) {
 // Job processing (shared between polling and Service Bus)
 // ─────────────────────────────────────────────
 
-async function processJob(job: any): Promise<void> {
+async function processJob(job: any, whisperRate: number, transcribeModel: string): Promise<void> {
   let heartbeat: NodeJS.Timeout | null = null;
 
   try {
@@ -288,7 +249,7 @@ async function processJob(job: any): Promise<void> {
       ? Number(audioSecondsRaw)
       : undefined
     const costUsd =
-      audioSeconds !== undefined ? audioSeconds * WHISPER_RATE : undefined
+      audioSeconds !== undefined ? audioSeconds * whisperRate : undefined
 
     if (userId && organizationId) {
       await logAIUsage({
@@ -296,7 +257,7 @@ async function processJob(job: any): Promise<void> {
         organization_id: organizationId,
         job_id: job.id,
         event_type: "transcription",
-        model: TRANSCRIBE_MODEL,
+        model: transcribeModel,
         audio_seconds: audioSeconds,
         cost_usd: costUsd,
       })
@@ -343,15 +304,15 @@ async function fetchJobById(jobId: string): Promise<any> {
   return result.rows[0] ?? null;
 }
 
-async function serviceBusWorker() {
+async function serviceBusWorker(namespace: string, queueName: string, whisperRate: number, transcribeModel: string) {
   console.log("Worker started (Service Bus mode)");
-  console.log(`Connecting to namespace: ${SERVICEBUS_NAMESPACE}`);
-  console.log(`Queue: ${SERVICEBUS_QUEUE}`);
+  console.log(`Connecting to namespace: ${namespace}`);
+  console.log(`Queue: ${queueName}`);
 
   // Managed Identity authentication (SOC2/HIPAA compliant)
   const credential = new DefaultAzureCredential();
-  const sbClient = new ServiceBusClient(SERVICEBUS_NAMESPACE!, credential);
-  const receiver = sbClient.createReceiver(SERVICEBUS_QUEUE!);
+  const sbClient = new ServiceBusClient(namespace, credential);
+  const receiver = sbClient.createReceiver(queueName);
 
   try {
     await logSystemEvent({
@@ -395,7 +356,7 @@ async function serviceBusWorker() {
         return;
       }
 
-      await processJob(job);
+      await processJob(job, whisperRate, transcribeModel);
       await receiver.completeMessage(message);
     } catch (err: any) {
       console.error(`Job ${jobId} failed:`, err);
@@ -454,7 +415,7 @@ async function serviceBusWorker() {
 // Polling worker loop (fallback)
 // ─────────────────────────────────────────────
 
-async function pollingWorkerLoop() {
+async function pollingWorkerLoop(whisperRate: number, transcribeModel: string) {
   console.log("Worker started (polling mode)");
 
   try {
@@ -479,7 +440,7 @@ async function pollingWorkerLoop() {
         continue;
       }
 
-      await processJob(job);
+      await processJob(job, whisperRate, transcribeModel);
     } catch (err: any) {
       if (!job) {
         console.error("Worker error before job assignment:", err);
@@ -504,17 +465,61 @@ async function pollingWorkerLoop() {
 }
 
 // ─────────────────────────────────────────────
+// Main entry point
+// ─────────────────────────────────────────────
+
+async function main() {
+  // ─────────────────────────────────────────────
+  // Environment validation (inside main to ensure env vars are resolved)
+  // ─────────────────────────────────────────────
+
+  const postgresHost = process.env.AZURE_POSTGRES_HOST;
+  const postgresDb = process.env.AZURE_POSTGRES_DB;
+
+  if (!postgresHost || !postgresDb) {
+    throw new Error('Missing database config: set AZURE_POSTGRES_HOST and AZURE_POSTGRES_DB');
+  }
+
+  if (!process.env.AZURE_STORAGE_ACCOUNT_NAME) {
+    throw new Error('Missing AZURE_STORAGE_ACCOUNT_NAME environment variable');
+  }
+
+  // Config values
+  const whisperRate = Number(process.env.WHISPER_RATE ?? '0');
+  const transcribeModel = process.env.USE_AZURE_OPENAI === 'true'
+    ? process.env.AZURE_WHISPER_DEPLOYMENT_NAME || 'whisper-1'
+    : 'gpt-4o-transcribe';
+
+  // Service Bus config
+  const serviceBusNamespace = process.env.SERVICEBUS_NAMESPACE_FQDN;
+  const serviceBusQueue = process.env.SERVICEBUS_QUEUE_NAME;
+  const useServiceBus = Boolean(serviceBusNamespace && serviceBusQueue);
+
+  console.log('─────────────────────────────────────────────');
+  console.log('SageScript Worker Starting');
+  console.log('─────────────────────────────────────────────');
+  console.log(`Database: ${postgresHost}/${postgresDb}`);
+  console.log(`Storage: ${process.env.AZURE_STORAGE_ACCOUNT_NAME}`);
+  console.log(`Mode: ${useServiceBus ? 'Service Bus' : 'Polling'}`);
+  if (useServiceBus) {
+    console.log(`Service Bus: ${serviceBusNamespace}`);
+    console.log(`Queue: ${serviceBusQueue}`);
+  }
+  console.log('─────────────────────────────────────────────');
+
+  // Start worker
+  if (useServiceBus) {
+    await serviceBusWorker(serviceBusNamespace!, serviceBusQueue!, whisperRate, transcribeModel);
+  } else {
+    await pollingWorkerLoop(whisperRate, transcribeModel);
+  }
+}
+
+// ─────────────────────────────────────────────
 // Boot
 // ─────────────────────────────────────────────
 
-if (USE_SERVICE_BUS) {
-  serviceBusWorker().catch(err => {
-    console.error('Worker crashed (Service Bus):', err)
-    process.exit(1)
-  })
-} else {
-  pollingWorkerLoop().catch(err => {
-    console.error('Worker crashed (polling):', err)
-    process.exit(1)
-  })
-}
+main().catch(err => {
+  console.error('Worker crashed:', err);
+  process.exit(1);
+});
