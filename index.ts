@@ -298,7 +298,7 @@ async function fetchJobById(jobId: string): Promise<any> {
      SET status = 'processing', last_heartbeat_at = NOW()
      WHERE id = $1 AND status = 'pending'
      RETURNING id, audio_path, organization_id, entra_oid, user_id,
-               retry_count, max_retries, audio_seconds, audio_duration_seconds, audio_duration`,
+               retry_count, max_retries`,
     [jobId]
   );
   return result.rows[0] ?? null;
