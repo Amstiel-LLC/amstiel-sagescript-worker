@@ -38,6 +38,32 @@ if (USE_AZURE) {
 }
 
 // ─────────────────────────────────────────────
+// Post-processing: flag consecutive duplicates
+// ─────────────────────────────────────────────
+
+function flagConsecutiveDuplicates(text: string): string {
+  const paragraphs = text.split(/\n+/)
+  const result: string[] = []
+
+  for (let i = 0; i < paragraphs.length; i++) {
+    const trimmed = paragraphs[i].trim()
+    if (!trimmed) continue
+
+    const prev = result.length > 0 ? result[result.length - 1] : ''
+    // Strip any existing flag to compare raw text
+    const prevClean = prev.replace(/\s*\[DUPLICATE - FLAGGED FOR REVIEW\]\s*$/, '').trim()
+
+    if (trimmed === prevClean) {
+      result.push(`${trimmed} [DUPLICATE - FLAGGED FOR REVIEW]`)
+    } else {
+      result.push(trimmed)
+    }
+  }
+
+  return result.join('\n\n')
+}
+
+// ─────────────────────────────────────────────
 // Transcription function
 // ─────────────────────────────────────────────
 
@@ -58,10 +84,15 @@ export async function transcribeAudio(
         ? process.env.AZURE_WHISPER_DEPLOYMENT_NAME! // Your Azure deployment name
         : 'gpt-4o-transcribe', // OpenAI model name
       response_format: 'json',
+      prompt:
+        'Dear Sirs, Yours faithfully, witness statement, claimant, quantum, accident circumstances, opinion, recommendation, enclosures, time sheet, client interviewed, we are pleased to confirm, inspector, claim technician, solicitors, postcode, reference',
     })
 
+    // ── Post-processing: flag consecutive duplicate paragraphs ──
+    const text = flagConsecutiveDuplicates(response.text)
+
     return {
-      text: response.text,
+      text,
       segments: [],
     }
   } finally {
