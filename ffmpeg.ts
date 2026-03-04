@@ -1,4 +1,4 @@
-import { spawn } from 'child_process';
+import { spawn, execFileSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -22,6 +22,30 @@ export async function transcodeAudio(
   fs.rmSync(tempDir, { recursive: true, force: true });
 
   return outputBuffer;
+}
+
+/**
+ * Run ffprobe on an audio buffer and return the duration in seconds.
+ */
+export function probeAudioDuration(audioBuffer: Buffer): number {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffprobe-'));
+  const tempPath = path.join(tempDir, 'input');
+
+  try {
+    fs.writeFileSync(tempPath, audioBuffer);
+    const output = execFileSync('ffprobe', [
+      '-v', 'error',
+      '-show_entries', 'format=duration',
+      '-of', 'default=noprint_wrappers=1:nokey=1',
+      tempPath,
+    ]).toString().trim();
+    const duration = parseFloat(output);
+    return Number.isFinite(duration) ? duration : 0;
+  } catch {
+    return 0;
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 }
 
 function runFfmpeg(inputPath: string, outputPath: string): Promise<void> {

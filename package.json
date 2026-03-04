@@ -24,10 +24,16 @@
   "@azure/identity": "^4.13.0",
   
     
+  "@azure/monitor-opentelemetry": "^1.16.0",
+  
+    
   "@azure/service-bus": "^7.9.5",
   
     
   "@azure/storage-blob": "^12.18.0",
+  
+    
+  "applicationinsights": "^3.14.0",
   
     
   "dotenv": "^17.2.3",

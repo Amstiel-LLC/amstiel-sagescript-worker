@@ -3,12 +3,16 @@ import { File } from "node:buffer";
 (globalThis as any).File = File;
 
 import 'dotenv/config'
+import { initTelemetry, trackEvent } from './lib/telemetry.js'
+initTelemetry(); // Must be called before other imports initialize
+
 import { DefaultAzureCredential } from "@azure/identity";
 import { ServiceBusClient, ServiceBusReceivedMessage, ProcessErrorArgs } from "@azure/service-bus";
 import { transcribeAudio } from './whisper.js'
-import { transcodeAudio } from './ffmpeg.js'
+import { transcodeAudio, probeAudioDuration } from './ffmpeg.js'
 import { query, closePool } from './lib/db.js'
 import { downloadBlob } from './lib/azureStorage.js'
+import { evaluateBadges } from './lib/badges/evaluateBadges.js'
 
 // ─────────────────────────────────────────────
 // Utils
@@ -85,6 +89,33 @@ async function logSystemEvent(evt: {
   )
 }
 
+async function logAnalytics(evt: {
+  event_name: string;
+  user_id?: string;
+  org_id?: string;
+  job_id?: string;
+  document_id?: string;
+  properties?: Record<string, unknown>;
+}) {
+  try {
+    await query(
+      `INSERT INTO analytics_events
+       (event_name, user_id, org_id, job_id, document_id, properties, source)
+       VALUES ($1, $2, $3, $4, $5, $6, 'worker')`,
+      [
+        evt.event_name,
+        evt.user_id ?? null,
+        evt.org_id ?? null,
+        evt.job_id ?? null,
+        evt.document_id ?? null,
+        evt.properties ? JSON.stringify(evt.properties) : '{}',
+      ]
+    )
+  } catch (err: any) {
+    console.error('[analytics] logAnalytics failed:', evt.event_name, err?.message)
+  }
+}
+
 // ─────────────────────────────────────────────
 // Job helpers
 // ─────────────────────────────────────────────
@@ -152,6 +183,20 @@ function classifyError(err: any): boolean {
 async function handleJobFailure(job: any, err: any) {
   const retryable = classifyError(err)
   const now = new Date().toISOString()
+
+  // Analytics: transcription_failed
+  logAnalytics({
+    event_name: "transcription_failed",
+    user_id: job.entra_oid ?? job.user_id,
+    org_id: job.organization_id,
+    job_id: job.id,
+    properties: {
+      failure_reason: err?.message ?? "Unknown error",
+      error_message: err?.message,
+      retry_count: (job.retry_count ?? 0) + 1,
+      retryable,
+    },
+  })
   const nextRetryCount = (job.retry_count ?? 0) + 1
 
   if (retryable && nextRetryCount <= (job.max_retries ?? 3)) {
@@ -190,6 +235,7 @@ async function processJob(job: any, whisperRate: number, transcribeModel: string
 
   try {
     console.log(`Processing job ${job.id}`);
+    const processingStartTime = Date.now();
 
     const userId = job.entra_oid ?? job.user_id
     const organizationId = job.organization_id
@@ -235,19 +281,16 @@ async function processJob(job: any, whisperRate: number, transcribeModel: string
     const processedAudio = await transcodeAudio(audio);
     console.log("JOB", job.id, "ffmpeg complete");
 
+    // Probe audio duration from the transcoded file
+    const probedDuration = probeAudioDuration(processedAudio);
+    console.log(`JOB ${job.id} audio duration: ${probedDuration}s`);
+
     // Whisper transcription
     console.log("JOB", job.id, "starting whisper");
     const { text, segments } = await transcribeAudio(processedAudio);
     console.log("JOB", job.id, "whisper complete");
 
-    const audioSecondsRaw =
-      job.audio_seconds ??
-      job.audio_duration_seconds ??
-      job.audio_duration ??
-      null
-    const audioSeconds = Number.isFinite(Number(audioSecondsRaw))
-      ? Number(audioSecondsRaw)
-      : undefined
+    const audioSeconds = probedDuration > 0 ? probedDuration : undefined
     const costUsd =
       audioSeconds !== undefined ? audioSeconds * whisperRate : undefined
 
@@ -275,6 +318,48 @@ async function processJob(job: any, whisperRate: number, transcribeModel: string
         job_id: job.id,
         event_type: "transcribing_completed",
       })
+    }
+
+    // Analytics: transcription_completed
+    const transcriptionDurationSeconds = (Date.now() - processingStartTime) / 1000;
+    const rawWordCount = text.split(/\s+/).filter(Boolean).length;
+    await logAnalytics({
+      event_name: "transcription_completed",
+      user_id: userId,
+      org_id: organizationId,
+      job_id: job.id,
+      properties: {
+        audio_duration_seconds: audioSeconds ?? null,
+        transcription_duration_seconds: Math.round(transcriptionDurationSeconds * 100) / 100,
+        speed_ratio: audioSeconds && audioSeconds > 0
+          ? Math.round((audioSeconds / transcriptionDurationSeconds) * 100) / 100
+          : null,
+        raw_word_count: rawWordCount,
+        model: transcribeModel,
+        cost_usd: costUsd ?? null,
+      },
+    })
+
+    // App Insights: transcription_completed
+    console.log(`[telemetry] About to call trackEvent("transcription_completed") for job ${job.id}`);
+    await trackEvent("transcription_completed", {
+      job_id: job.id,
+      org_id: organizationId,
+      user_id: userId,
+      audio_duration_seconds: audioSeconds ?? 0,
+      transcription_duration_seconds: Math.round(transcriptionDurationSeconds * 100) / 100,
+      file_size_bytes: audio.length,
+    })
+
+    // Badge evaluation — fire-and-forget
+    if (userId && organizationId) {
+      evaluateBadges({
+        userId,
+        orgId: organizationId,
+        eventName: "transcription_completed",
+        properties: { audio_duration_seconds: audioSeconds ?? 0 },
+        queryFn: query,
+      });
     }
 
     console.log("JOB", job.id, "marking completed");
