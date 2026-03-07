@@ -197,6 +197,17 @@ async function handleJobFailure(job: any, err: any) {
       retryable,
     },
   })
+
+  // App Insights: transcription_failed
+  await trackEvent("transcription_failed", {
+    org_id: job.organization_id,
+    document_id: job.id,
+    audio_duration_seconds: job.audio_seconds ?? job.audio_duration_seconds ?? 0,
+    failure_reason: err?.message ?? "Unknown error",
+    error_message: err?.message ?? "",
+    timestamp: now,
+  })
+
   const nextRetryCount = (job.retry_count ?? 0) + 1
 
   if (retryable && nextRetryCount <= (job.max_retries ?? 3)) {
@@ -365,6 +376,18 @@ async function processJob(job: any, whisperRate: number, transcribeModel: string
     console.log("JOB", job.id, "marking completed");
     await markJobCompleted(job.id, transcriptId);
     console.log(`Job ${job.id} completed`);
+
+    // App Insights: pipeline_completed (full worker pipeline)
+    const totalPipelineSeconds = (Date.now() - processingStartTime) / 1000;
+    await trackEvent("pipeline_completed", {
+      org_id: organizationId,
+      document_id: transcriptId,
+      audio_duration_seconds: audioSeconds ?? 0,
+      total_pipeline_seconds: Math.round(totalPipelineSeconds * 100) / 100,
+      transcription_seconds: Math.round(transcriptionDurationSeconds * 100) / 100,
+      formatting_seconds: 0,
+      timestamp: new Date().toISOString(),
+    })
   } finally {
     // 🧹 ALWAYS CLEAR HEARTBEAT
     if (heartbeat) {
